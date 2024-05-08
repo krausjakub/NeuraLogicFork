@@ -9,6 +9,7 @@ import cz.cvut.fel.ida.logic.constructs.Conjunction;
 import cz.cvut.fel.ida.logic.constructs.example.QueryAtom;
 import cz.cvut.fel.ida.logic.constructs.example.ValuedFact;
 import cz.cvut.fel.ida.logic.constructs.template.components.BodyAtom;
+import cz.cvut.fel.ida.logic.constructs.template.components.HeadAtom;
 import cz.cvut.fel.ida.logic.constructs.template.components.WeightedRule;
 import cz.cvut.fel.ida.logic.constructs.template.types.GraphTemplate;
 import cz.cvut.fel.ida.logic.subsumption.HerbrandModel;
@@ -25,23 +26,43 @@ import java.util.stream.Collectors;
 public class Template implements Model<QueryAtom>, Exportable {
     private static final Logger LOG = Logger.getLogger(Template.class.getName());
 
+    /**
+     * counter used just for naming
+     */
     static int counter = 0;
-
     protected String name;
 
     public LinkedHashSet<WeightedRule> rules;
-
     public LinkedHashSet<ValuedFact> facts;
+    @Nullable
     public LinkedHashSet<Conjunction> constraints;  //todo how to handle these?
 
+    /**
+     * Good to know for stratification checking
+     */
+    public boolean containsNegation = false;
+
+    /**
+     * Template's own inference engine, storing preprocessed structures
+     */
+    public transient HerbrandModel herbrandModel;
+
+    /**
+     * Atoms inferred on top of the given {@link #facts} using the {@link #herbrandModel}
+     */
     @Nullable
-    public transient Set<Literal> inferredLiterals;
+    public transient Set<Literal> inferredAtoms;
+    /**
+     * All possible atoms altogether ({@link #facts} +  {@link #inferredAtoms})
+     */
+    @Nullable
+    private transient Set<Literal> allAtoms;
 
     /**
      * This is merely for computational reuse (it can be computed any time from the rules).
      */
     @Nullable
-    transient public Map<HornClause, List<WeightedRule>> hornClauses;
+    public transient Map<HornClause, List<WeightedRule>> hornClauses;
 
     public Template() {
         this.name = "template" + counter++;
@@ -55,6 +76,7 @@ public class Template implements Model<QueryAtom>, Exportable {
         this.rules = other.rules;
         this.facts = other.facts;
         this.constraints = other.constraints;
+        this.containsNegation = other.containsNegation;
     }
 
     public Template(List<WeightedRule> rules, List<ValuedFact> facts) {
@@ -79,14 +101,14 @@ public class Template implements Model<QueryAtom>, Exportable {
 
     /**
      * Return UNIQUE weights list
+     *
      * @return
      */
     @Override
     public List<Weight> getAllWeights() {
         List<Weight> weightList = new ArrayList<>();
         for (WeightedRule rule : rules) {
-            if (rule.getWeight() != null)
-                weightList.add(rule.getWeight());
+            if (rule.getWeight() != null) weightList.add(rule.getWeight());
             Weight offset = rule.getOffset();
             if (offset != null) {
                 offset.isOffset = true;
@@ -98,12 +120,11 @@ public class Template implements Model<QueryAtom>, Exportable {
                 weightList.add(headOffset);
             }
             for (BodyAtom bodyAtom : rule.getBody()) {
-                if (bodyAtom.getConjunctWeight() != null)
-                    weightList.add(bodyAtom.getConjunctWeight());
+                if (bodyAtom.getConjunctWeight() != null) weightList.add(bodyAtom.getConjunctWeight());
             }
         }
         for (ValuedFact fact : facts) {
-            if (fact.weight != null){
+            if (fact.weight != null) {
                 weightList.add(fact.weight);
             }
         }
@@ -116,7 +137,6 @@ public class Template implements Model<QueryAtom>, Exportable {
     }
 
     public void updateWeightsFrom(Map<Integer, Weight> neuralWeights) {
-//        Map<Integer, Weight> neuralWeights = neuralModel.mapWeightsToIds();
         List<Weight> templateWeights = getAllWeights();
         for (Weight weight : templateWeights) {
             if (weight.isLearnable()) {
@@ -125,35 +145,47 @@ public class Template implements Model<QueryAtom>, Exportable {
         }
     }
 
-    public LinkedHashSet<ValuedFact> getValuedFacts() {
-        return facts;
-    }
-
-    public Set<Literal> getAllFacts() {
-        if (inferredLiterals == null) {
-            inferredLiterals = inferTemplateFacts();
-            if (inferredLiterals != null)
-                inferredLiterals.addAll(facts.stream().map(ValuedFact::getLiteral).collect(Collectors.toList()));
+    public Set<Literal> getAllAtoms() {
+        if (allAtoms != null) {
+            return allAtoms;
         }
-        return inferredLiterals;
+        allAtoms = facts.stream().map(ValuedFact::getLiteral).collect(Collectors.toSet());
+        if (inferredAtoms == null) {
+            preprocessInference();
+        }
+        allAtoms.addAll(inferredAtoms);
+        return allAtoms;
     }
 
     public void setFacts(LinkedHashSet<ValuedFact> facts) {
         this.facts = facts;
     }
 
-    public Set<Literal> inferTemplateFacts() {
-        if (facts == null || facts.isEmpty())
-            return null;
-        if (inferredLiterals == null)
-            inferredLiterals = new HashSet<>();
+    public void preprocessInference() {
+        if (inferredAtoms == null) {
+            inferredAtoms = new HashSet<>();
+        }
+        for (Iterator<ValuedFact> iterator = facts.iterator(); iterator.hasNext(); ) {
+            ValuedFact fact = iterator.next();
+            if (fact.literal.containsVariable()) {
+                iterator.remove();
+                WeightedRule weightedRule = new WeightedRule();
+                weightedRule.setOriginalString(fact.originalString);
+                HeadAtom headAtom = new HeadAtom(fact.offsettedPredicate, fact.literal.termList());
+                weightedRule.setHead(headAtom);
+                weightedRule.setWeight(fact.weight);
+                weightedRule.setHashCode(headAtom.hashCode());
+                weightedRule.setBody(new LinkedList<>());
+                rules.add(weightedRule);
+            }
+        }
 
-        HerbrandModel herbrandModel = new HerbrandModel();
-        Set<Literal> facts = this.facts.stream().map(ValuedFact::getLiteral).collect(Collectors.toSet());
-        Set<HornClause> rules = this.rules.stream().map(WeightedRule::toHornClause).collect(Collectors.toSet());
-        Collection<Literal> values = herbrandModel.inferLiterals(rules, facts);
-        inferredLiterals.addAll(values);
-        return inferredLiterals;
+        LinkedHashSet<Literal> facts = this.facts.stream().map(ValuedFact::getLiteral).collect(Collectors.toCollection(LinkedHashSet::new));
+        LinkedHashSet<HornClause> rules = this.rules.stream().map(WeightedRule::toHornClause).collect(Collectors.toCollection(LinkedHashSet::new));
+
+        herbrandModel = new HerbrandModel(facts, rules);
+        Collection<Literal> atoms = herbrandModel.inferAtoms();
+        inferredAtoms.addAll(atoms);
     }
 
     public GraphTemplate prune(QueryAtom query) {

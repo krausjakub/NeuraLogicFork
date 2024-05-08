@@ -62,6 +62,11 @@ public class TemplateProcessingBuilder extends AbstractPipelineBuilder<Sources, 
                 sourcesTemplatePipe.connectAfter(nextPipe);
             }
             Pipe<?, Template> nextPipe1 = nextPipe;
+            if (settings.checkStratification){
+                Pipe<Template, Template> stratificationPipe = pipeline.registerEnd(checkStratificationPipe());
+                nextPipe1.connectAfter(stratificationPipe);
+                nextPipe1 = stratificationPipe;
+            }
             if (settings.reduceTemplate) {
                 Pipe<Template, GraphTemplate> graphTemplatePipe = pipeline.register(buildTemplateGraph());
                 nextPipe.connectAfter(graphTemplatePipe);
@@ -69,8 +74,8 @@ public class TemplateProcessingBuilder extends AbstractPipelineBuilder<Sources, 
                 graphTemplatePipe.connectAfter(pipeline.registerEnd(reduceTemplatePipe));
                 nextPipe1 = reduceTemplatePipe;
             }
-            if (settings.inferTemplateFacts) {
-                Pipe<Template, Template> inferencePipe = pipeline.registerEnd(inferFacts());
+            if (settings.preprocessTemplateInference) {
+                Pipe<Template, Template> inferencePipe = pipeline.registerEnd(preprocessInference());
                 nextPipe1.connectAfter(inferencePipe);
                 nextPipe1 = inferencePipe;
             }
@@ -84,11 +89,25 @@ public class TemplateProcessingBuilder extends AbstractPipelineBuilder<Sources, 
         return pipeline;
     }
 
-    protected Pipe<Template, Template> inferFacts() {
+    private Pipe<Template, Template> checkStratificationPipe() {
+        return new Pipe<Template, Template>("CheckStratificationPipe") {
+            @Override
+            public Template apply(Template template) {
+                if (template.containsNegation) {
+                    GraphTemplate graphTemplate = new GraphTemplate(template);
+                    graphTemplate.new Stratification(graphTemplate).check();
+                    return graphTemplate;
+                }
+                return template;
+            }
+        };
+    }
+
+    protected Pipe<Template, Template> preprocessInference() {
         return new Pipe<Template, Template>("TemplateInferencePipe") {
             @Override
             public Template apply(Template template) {
-                template.inferTemplateFacts();
+                template.preprocessInference();
                 return template;
             }
         };

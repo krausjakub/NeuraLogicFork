@@ -1,125 +1,110 @@
 package cz.cvut.fel.ida.logic.subsumption;
 
 import cz.cvut.fel.ida.logic.*;
+import cz.cvut.fel.ida.utils.generic.Pair;
 import cz.cvut.fel.ida.utils.math.Sugar;
 import cz.cvut.fel.ida.utils.math.VectorUtils;
 import cz.cvut.fel.ida.utils.math.collections.MultiMap;
-import cz.cvut.fel.ida.utils.generic.Pair;
 
 import java.util.*;
 import java.util.logging.Logger;
 
 /**
- * Least Herbrand model from purely logical world (taken from Ondra)
+ * Least Herbrand model from purely logical world (building on Ondrej's subsumption solver)
  */
 public class HerbrandModel {
     private static final Logger LOG = Logger.getLogger(HerbrandModel.class.getName());
 
     /**
-     * Map predicates to ground literal Sets
+     * Map predicates to SETs of ground atoms
      */
-    public HerbrandMap herbrand;
+    private MultiMap<Predicate, Literal> herbrand;
 
     /**
-     * Using the subsumption engine wrapper
+     * Use the subsumption engine wrapper
      */
-    public Matching matching;
-
-    public HerbrandModel() {
-        herbrand = new HerbrandMap();
-    }
-
-    public HerbrandModel(HerbrandMap init) {
-        herbrand = init;
-    }
-
-    public HerbrandModel(Collection<Literal> facts) {
-        herbrand = new HerbrandMap();
-        populateHerbrand(facts);
-    }
+    private Matching matching;
 
     /**
-     * @param clauses - may contain facts and rules
-     * @return
+     * The current Herbrand model processed as an indexed structure
      */
-    public HerbrandMap inferModel(Collection<? extends Clause> clauses) {
-        Pair<List<HornClause>, List<Literal>> rulesAndFacts = rulesAndFacts(clauses);
-        return inferModel(rulesAndFacts.r, rulesAndFacts.s);
-    }
+    private SubsumptionEngineJ2.ClauseE clauseE;
 
-    public Collection<Literal> inferLiterals(Collection<HornClause> irules, Collection<Literal> facts) {
-        HerbrandMap herbrandMap = inferModel(irules, facts);
-        return Sugar.flatten(herbrandMap.getLiterals());
+    /**
+     * The rules used to create the current Herbrand model pre-processed as an indexed structure
+     */
+    public LinkedHashMap<HornClause, PreparedRule> preparedRules;
+
+    public HerbrandModel(Collection<Literal> facts, Collection<HornClause> rules) {
+        herbrand = new MultiMap<>();
+        preparedRules = new LinkedHashMap<>();
+        matching = new Matching();
+        addFacts(facts);
+        addRules(rules);
     }
 
     /**
-     * todo add version with constraints at input
+     * The main Herbrand model/interpretation computation (Datalog inference) happens here...
+     * <p>
+     * todo somehow change this to incrementally pass only NEW facts to existing ClauseE without reindexing from scratch?
+     * <p>
+     * todo follow the rule precedence/order from the GraphTemplate here, so that we can skip the upper layer rules in the first iterations...
+     *      - not a big speedup, as there is a fast initial check whether the ClauseE contains all the predicates from ClauseC at the very beginning
      *
-     * @param irules
-     * @param facts
      * @return
      */
-    public HerbrandMap inferModel(Collection<HornClause> irules, Collection<Literal> facts) {
-        populateHerbrand(facts);
-
-        LinkedHashSet<HornClause> rules = new LinkedHashSet<>(irules); //for removing
-        //rule heads map to empty sets at the beginning
-        Set<Predicate> headSignatures = new LinkedHashSet<>();  //for faster iteration
-        for (HornClause rule : rules) {
-            headSignatures.add(rule.head().predicate());
-            herbrand.set(rule.head().predicate(), new HashSet<>());
-        }
-
+    public Collection<Literal> inferAtoms() {
         boolean changed;
         int round = 0;
 
         int herbrandSize0 = VectorUtils.sum(herbrand.sizes());
         LOG.finer("herbrand size before round " + round + " = " + herbrandSize0);
         do {
-            //get all valid literals from current herbrand in to matching
-            matching = new Matching(Sugar.<Clause>list(new Clause(Sugar.flatten(herbrand.values())))); //todo somehow change this to incrementally pass only NEW facts (ClauseE) to existing Matching object for speedup? Try version without example indexing
-            //LOG.finest("Matching created.");
-            for (Predicate predicate : headSignatures) {
-                //may overwrite the previous ones which is actually what we want (?)
-                matching.getEngine().addCustomPredicate(new TupleNotIn(predicate, herbrand.get(predicate))); //predicate that evaluates to true if the head-mapping set does not containt such a literal yet
-            }
-            for (Iterator<? extends HornClause> iterator = rules.iterator(); iterator.hasNext(); ) {
-                HornClause rule = iterator.next();
-                Literal head = rule.head();
-                // solution consumer = automatically add all found valid substitutions of the head literal into the herbrand map
-                SolutionConsumer solutionConsumer = new PredicateSolutionConsumer(head, herbrand.get(head.predicate()));
-                matching.getEngine().addSolutionConsumer(solutionConsumer);
+            //get all valid literals from the CURRENT herbrand model/map into a newly indexed ClauseE structure
+            final Clause exampleClause = new Clause(Sugar.flatten(herbrand.values()));
+            clauseE = matching.createClauseE(exampleClause);
+
+            LinkedList<Map.Entry<HornClause, PreparedRule>> entries = new LinkedList<>(preparedRules.entrySet()); // a copy for removing
+            for (Iterator<Map.Entry<HornClause, PreparedRule>> iterator = entries.iterator(); iterator.hasNext(); ) {
+                final Map.Entry<HornClause, PreparedRule> next = iterator.next();
+                final HornClause rule = next.getKey();
+                final PreparedRule preparedRule = next.getValue();
+
+                matching.getEngine().addSolutionConsumer(preparedRule.solutionConsumer);
                 // if the rule head is already ground
-                if (LogicUtils.isGround(head)) {
-
-//                    Clause query = new Clause(LogicUtils.flipSigns(rule.body().literals()));
-                    Clause query = new Clause(rule.body().literals());  //todo next both versions work in non-ground bodies, but only this one in ground bodies, investigate why
-
-                    // add the head to herbrand if the rule body is true
-                    if (matching.subsumption(query, 0)) {
-                        herbrand.put(head.predicate(), head);
+                if (preparedRule.isGroundHead) {
+                    // add the head to herbrand iff the rule body is true
+                    if (matching.subsumption(preparedRule.clauseC, clauseE)) {
+                        herbrand.put(rule.head().predicate(), rule.head());
                         iterator.remove(); // if so, do not ever try this ground rule again
                     }
-                } else {
-                    //if it is not ground, extend the rule with restriction that the head substitution solution must not be contained in the herbrand yet (for speedup instead of just adding them repetitively to the set)
-                    Clause query = new Clause(Sugar.union(rule.getNegatedLiterals(), new Literal(tupleNotInPredicateName(head.predicate()), false, head.arguments())));
-                    cz.cvut.fel.ida.utils.generic.tuples.Pair<Term[], List<Term[]>> listPair = matching.allSubstitutions(query, 0, Integer.MAX_VALUE);//then find (and through consumer add to herbrand) all NEW substitutions for the head literal - todo add version where these substitutions will be iteratively saved into some hashmap instead of repeating final substitutions
-//                    System.out.printf("");
+                } else {  //if it is not ground, find (and in the background through the solutionConsumer add to herbrand) all NEW substitutions for the head literal
+                    matching.allSubstitutions(preparedRule.clauseC, clauseE, Integer.MAX_VALUE);
                 }
-                matching.getEngine().removeSolutionConsumer(solutionConsumer); //the found substitutions should be applied only to the head of the currently solved rule
+                //remove the consumer as the found substitutions should be applied only to the head of the currently solved rule
+                matching.getEngine().removeSolutionConsumer(preparedRule.solutionConsumer);
             }
-            LOG.finest(() -> irules.size() + " rules grounded.");
+            LOG.finest(() -> preparedRules.size() + " rules grounded.");
             int herbrandSize1 = VectorUtils.sum(herbrand.sizes());
             LOG.finer("herbrand size after round " + round++ + " = " + herbrandSize1);
             changed = herbrandSize1 > herbrandSize0;
             herbrandSize0 = herbrandSize1;  //reset to next round
         } while (changed);
-        return herbrand;
+        return Sugar.flatten(herbrand.values());
     }
 
-    public Pair<Term[], List<Term[]>> groundingSubstitutions(HornClause hornClause) {
-        Clause query = new Clause(hornClause.getLiterals()); //todo check negations here
-        cz.cvut.fel.ida.utils.generic.tuples.Pair<Term[], List<Term[]>> listPair = matching.allSubstitutions(query, 0, Integer.MAX_VALUE);
+    /**
+     * Here we really want to ask the current Herbrand base for all substitutions
+     * - i.e. we do not prune with the tuple-not-in special predicates anymore!
+     *
+     * @return
+     */
+    public Pair<Term[], List<Term[]>> groundingSubstitutions(Clause clause) {
+        if (clauseE == null) {
+            clauseE = matching.createClauseE(new Clause(Sugar.flatten(herbrand.values())));
+        }
+        final SubsumptionEngineJ2.ClauseC clauseC = matching.createClauseC(clause);
+        cz.cvut.fel.ida.utils.generic.tuples.Pair<Term[], List<Term[]>> listPair = matching.allSubstitutions(clauseC, clauseE, Integer.MAX_VALUE);
 
         Term[] variables = listPair.r;
         for (int i = 0; i < variables.length; i++) {
@@ -129,17 +114,74 @@ public class HerbrandModel {
         return new Pair<>(variables, listPair.s);
     }
 
-
     /**
-     * add all existing unit ground literals (facts) to herbrand set
+     * Add all existing unit ground literals (facts) to the herbrand map
      *
      * @param facts
      */
-    public void populateHerbrand(Collection<Literal> facts) {
+    public void addFacts(Collection<Literal> facts) {
         for (Literal groundLiteral : facts) {
-            herbrand.put(new Predicate(groundLiteral.predicateName(), groundLiteral.arity()), groundLiteral);
+            herbrand.put(groundLiteral.predicate(), groundLiteral);
         }
     }
+
+    /**
+     * Preprocess all the horn clauses to later work with them through Matching
+     *
+     * @param rules
+     * @return
+     */
+    public void addRules(Collection<HornClause> rules) {
+        //rule heads map to empty sets at the beginning
+        for (HornClause rule : rules) {
+            final Predicate headPredicate = rule.head().predicate();
+            if (!herbrand.containsKey(headPredicate)) {   //a rule head predicate might have been in the facts already!
+                herbrand.set(headPredicate, Collections.synchronizedSet(new HashSet<>()));
+            }
+            final boolean isGroundHead = LogicUtils.isGround(rule.head());
+            final SubsumptionEngineJ2.ClauseC clauseC = prepareClauseForGrounder(rule, isGroundHead);
+            // solution consumer = automatically add all found valid substitutions of the head literal into the herbrand map
+            PredicateSolutionConsumer solutionConsumer = new PredicateSolutionConsumer(rule.head(), herbrand.get(headPredicate));
+
+            preparedRules.put(rule, new PreparedRule(clauseC, isGroundHead, solutionConsumer));
+        }
+    }
+
+    public void removeRules(Collection<HornClause> rules) {
+        for (HornClause rule : rules) {
+            preparedRules.remove(rule);
+        }
+    }
+
+    /**
+     * Transform the input HornClause (may contain negated literals in body) into a preprocessed ClauseC structure
+     * suitable for {@link Matching}, which is also updated with special predicates from the rule in the process
+     * - adds special predicate that evaluates to true if the head-mapping set does not contain such a literal YET
+     *
+     * @param hc
+     * @return
+     */
+    public SubsumptionEngineJ2.ClauseC prepareClauseForGrounder(HornClause hc, boolean groundHead) {
+        final Predicate headPredicate = hc.head().predicate();
+        Set<Literal> literalSet = new HashSet<>(hc.body().literals());
+
+        //extend the rule with restriction that the head substitution solution must not be contained in the herbrand YET (for speedup instead of just adding them repetitively to the set)
+        matching.getEngine().addCustomPredicate(new TupleNotIn(headPredicate, herbrand.get(headPredicate)));
+
+        for (Literal l : hc.body().literals()) {
+            if (l.isNegated()) {
+                literalSet.add(new Literal(tupleNotInPredicateName(l.predicate()), false, l.arguments()));  //negated body literals will only be satified if not found YET (see @link TupleNotIn)
+                matching.getEngine().addCustomPredicate(new TupleNotIn(l.predicate(), herbrand.get(l.predicate())));
+            }
+        }
+        if (!groundHead) {
+            literalSet.add(hc.head().negation());
+            literalSet.add(new Literal(tupleNotInPredicateName(headPredicate), false, hc.head().arguments()));
+        }
+        final Clause clause = new Clause(literalSet);
+        return matching.createClauseC(clause);
+    }
+
 
     /**
      * Split given clauses into ground facts and rules, filter out the rest
@@ -155,25 +197,22 @@ public class HerbrandModel {
                 groundFacts.add(Sugar.chooseOne(c.literals()));
             } else {
                 HornClause hc = new HornClause(c);
-                if (hc.body() != null)
-                    rest.add(hc);
+                if (hc.body() != null) rest.add(hc);
             }
         }
         return new Pair<>(rest, groundFacts);
     }
 
-    /**
-     * Name of the special predicate for binding within the substitution engine
-     *
-     * @param predicate
-     * @return
-     */
-    private static String tupleNotInPredicateName(Predicate predicate) {
-        return "@tuplenotin-" + predicate.name + "/" + predicate.arity;
-    }
+    public class PreparedRule {
+        final SubsumptionEngineJ2.ClauseC clauseC;
+        final boolean isGroundHead;
+        final PredicateSolutionConsumer solutionConsumer;
 
-    public void clear() {
-        herbrand.clear();
+        public PreparedRule(SubsumptionEngineJ2.ClauseC clauseC, boolean isGroundHead, PredicateSolutionConsumer solutionConsumer) {
+            this.clauseC = clauseC;
+            this.isGroundHead = isGroundHead;
+            this.solutionConsumer = solutionConsumer;
+        }
     }
 
     /**
@@ -196,11 +235,25 @@ public class HerbrandModel {
             }
             headGroundings.add(ruleHead.subsCopy(solution));
         }
+
+        public void clear(){
+            headGroundings.clear();
+        }
+    }
+
+    /**
+     * Name of the special predicate for binding within the substitution engine
+     *
+     * @param predicate
+     * @return
+     */
+    public static String tupleNotInPredicateName(Predicate predicate) {
+        return "@tuplenotin-" + predicate.name + "/" + predicate.arity;
     }
 
     /**
      * For a given predicate stores all found substitutions and is only satisfiable for NEW solutions.
-     * To be added to the substitution engine for solution pruning.
+     * To be added to the substitution engine for solution pruning and stratified negation.
      */
     private static class TupleNotIn implements CustomPredicate {
 
@@ -232,9 +285,12 @@ public class HerbrandModel {
         }
     }
 
-    public static class HerbrandMap extends MultiMap<Predicate, Literal> {
-        public Collection<Set<Literal>> getLiterals() {
-            return super.values();
+    /**
+     * Removes everything from the herbrand map as well as all the (linked) solution consumers
+     */
+    public void removeAllAtoms() {
+        for (Map.Entry<Predicate, Set<Literal>> predicateSetEntry : herbrand.entrySet()) {
+            predicateSetEntry.getValue().clear();
         }
     }
 }

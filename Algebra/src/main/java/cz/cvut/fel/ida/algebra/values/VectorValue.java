@@ -261,6 +261,9 @@ public class VectorValue extends Value {
 
     @Override
     public String toString(NumberFormat numberFormat) {
+        if (numberFormat == null) {
+            return "dim:" + Arrays.toString(size());
+        }
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < values.length; i++) {
             sb.append(",").append(numberFormat.format(values[i]));
@@ -778,7 +781,11 @@ public class VectorValue extends Value {
      */
     @Override
     protected void incrementBy(ScalarValue value) {
-        throw new ArithmeticException("Incompatible dimensions of algebraic operation - scalar increment by vector");
+        if (values.length == 1) {
+            value.value += values[0];
+        } else {
+            throw new ArithmeticException("Incompatible dimensions of algebraic operation - scalar increment by vector");
+        }
     }
 
     /**
@@ -905,9 +912,11 @@ public class VectorValue extends Value {
     @Override
     public boolean equals(Value obj) {
         if (obj instanceof VectorValue) {
-            if (Arrays.equals(values, ((VectorValue) obj).values)) {
-                return true;
+            if (rowOrientation != ((VectorValue) obj).rowOrientation) {
+                return false;
             }
+
+            return Arrays.equals(values, ((VectorValue) obj).values);
         }
         return false;
     }

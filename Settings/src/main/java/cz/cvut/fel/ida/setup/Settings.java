@@ -1006,6 +1006,10 @@ public class Settings implements Serializable {
     //----------------Template Transformations
 
     /**
+     * Check if the template is stratified w.r.t. negation (no cycles with a negated edge)
+     */
+    public boolean checkStratification = true;
+    /**
      * Apply all metadata taken from sources
      */
     public boolean processMetadata = true;
@@ -1019,8 +1023,9 @@ public class Settings implements Serializable {
     public boolean reduceTemplate = false;
     /**
      * If the template contains facts, infer all other possible true facts as a preprocessing step (to save some time inferring the same things over and over later)
+     * AND also preprocess rules into more efficient (ClauseC) indexed structures and store for later
      */
-    public boolean inferTemplateFacts = true;
+    public boolean preprocessTemplateInference = true;
     /**
      * In advance of grounding (theorem proving), remove rules that are irrelevant to the given query (with no chance to be in support)
      */

@@ -25,6 +25,7 @@ public class MainStagesMutaBenchmarks {
 
     static String dataset = "relational/molecules/mutagenesis";
     static String template = "-t ./templates/template_gnnW10.txt";
+//    static String template = "-t ./templates/template_rings_gnn.txt";
 
 
     @TestAnnotations.PreciseBenchmark
@@ -65,6 +66,16 @@ public class MainStagesMutaBenchmarks {
     @Benchmark
     public void mutagenesisGrounding() throws Exception {
         Settings settings = Settings.forMediumTest();
+        String[] args = getDatasetArgs(dataset, template, "-lim -1 -ts 0");
+        Pair<Pipeline, ?> main = Main.main(args, settings);
+        System.out.println(main.s);
+    }
+
+    @Benchmark
+    @TestAnnotations.Medium
+    public void mutagenesisParallelGrounding() throws Exception {
+        Settings settings = Settings.forMediumTest();
+        settings.parallelGrounding = true;
         String[] args = getDatasetArgs(dataset, template, "-lim -1 -ts 0");
         Pair<Pipeline, ?> main = Main.main(args, settings);
         System.out.println(main.s);
